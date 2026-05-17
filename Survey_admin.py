@@ -1,3 +1,19 @@
+# ============================================================
+# Survey Response Dashboard
+# Project 4c — Procurement Intelligence Suite
+#
+# Copyright (c) 2026 Louis T. Filiano, MBA
+# All Rights Reserved.
+#
+# This software and its source code are proprietary and
+# confidential. Unauthorized copying, distribution, or use
+# of this file, via any medium, is strictly prohibited.
+#
+# Author:  Louis T. Filiano, MBA
+# Contact: filianowork@gmail.com | (214) 907-3294
+# GitHub:  github.com/LFilianoProcurement
+# ============================================================
+
 import streamlit as st
 import json
 import csv
@@ -7,6 +23,8 @@ import os
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import gspread
+from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -76,17 +94,67 @@ def get_score_color(score):
     else: return "#DC2626"
 
 
-RESPONSES_FILE = "survey_responses.json"
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
+SERVICE_ACCOUNT_FILE = "service_account.json"
+RESPONSES_FILE = "survey_responses.json"  # fallback
+
+def get_sheet():
+    """Connect to Google Sheet — supports local file and Streamlit Cloud secrets"""
+    try:
+        import streamlit as st
+        scopes = ["https://www.googleapis.com/auth/spreadsheets",
+                  "https://www.googleapis.com/auth/drive"]
+        try:
+            service_account_info = dict(st.secrets["gcp_service_account"])
+            creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
+        except:
+            creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
+        client = gspread.authorize(creds)
+        sheet_id = os.getenv("GOOGLE_SHEET_ID", "")
+        try:
+            sheet_id = st.secrets.get("GOOGLE_SHEET_ID", sheet_id)
+        except:
+            pass
+        return client.open_by_key(sheet_id).sheet1
+    except Exception as e:
+        return None
 
 def load_responses():
-    """Load all survey responses from shared JSON file"""
+    """Load all survey responses from Google Sheet"""
+    try:
+        sheet = get_sheet()
+        if sheet:
+            rows = sheet.get_all_records()
+            responses = []
+            for row in rows:
+                try:
+                    response = {
+                        "id": str(row.get("id", "")),
+                        "submitted_at": str(row.get("submitted_at", "")),
+                        "supplier": str(row.get("supplier", "")),
+                        "customer_name": str(row.get("customer_name", "")),
+                        "customer_company": str(row.get("customer_company", "")),
+                        "overall_avg": float(row.get("overall_avg", 0)),
+                        "scores": json.loads(row.get("scores_json", "{}")),
+                        "comments": json.loads(row.get("comments_json", "{}")),
+                        "source": str(row.get("source", "customer")),
+                        "period": str(row.get("period", "")),
+                        "weight": int(row.get("weight", 1))
+                    }
+                    responses.append(response)
+                except:
+                    continue
+            return sorted(responses, key=lambda x: x.get("submitted_at", ""), reverse=True)
+    except Exception as e:
+        st.error(f"Error loading from Google Sheet: {e}")
+    # Fallback to local file
     try:
         if os.path.exists(RESPONSES_FILE):
             with open(RESPONSES_FILE, "r") as f:
                 data = json.load(f)
                 return sorted(data, key=lambda x: x.get("submitted_at", ""), reverse=True)
-    except Exception as e:
-        st.error(f"Error loading responses: {e}")
+    except:
+        pass
     return []
 
 
@@ -473,6 +541,8 @@ def main():
         st.markdown("---")
         st.markdown("---")
         st.markdown("*Louis Filiano — Procurement Intelligence Suite*")
+        st.markdown("---")
+        st.markdown('<p style="color:#9CA3AF; font-size:0.75rem; text-align:center;">© 2026 Louis T. Filiano, MBA<br>All Rights Reserved</p>', unsafe_allow_html=True)
 
     if st.session_state.admin_code != "Birthday-41":
         st.markdown("""
@@ -855,9 +925,27 @@ def main():
                         )]
                     removed = len(all_data) - len(remaining)
                     try:
-                        with open(RESPONSES_FILE, "w") as f:
-                            import json
-                            json.dump(remaining, f, indent=2)
+                        sheet = get_sheet()
+                        if sheet:
+                            # Clear and rewrite sheet
+                            sheet.clear()
+                            if remaining:
+                                sheet.append_row(["id", "submitted_at", "supplier",
+                                                   "customer_name", "customer_company",
+                                                   "overall_avg", "scores_json",
+                                                   "comments_json", "source", "period", "weight"])
+                                for r in remaining:
+                                    sheet.append_row([
+                                        r.get("id",""), r.get("submitted_at",""),
+                                        r.get("supplier",""), r.get("customer_name",""),
+                                        r.get("customer_company",""),
+                                        str(r.get("overall_avg",0)),
+                                        json.dumps(r.get("scores",{})),
+                                        json.dumps(r.get("comments",{})),
+                                        r.get("source","customer"),
+                                        r.get("period",""),
+                                        str(r.get("weight",1))
+                                    ])
                         st.success(f"✅ Removed {removed} response(s) for **{clear_supplier}** — {clear_period}. Ready for next QBR!")
                         st.rerun()
                     except Exception as e:
@@ -873,9 +961,9 @@ def main():
         confirm_clear = st.checkbox("I understand this will delete ALL responses permanently", key="confirm_clear_all")
         if st.button("🗑️ Clear All Responses", disabled=not confirm_clear, use_container_width=True, key="clear_all_btn"):
             try:
-                with open(RESPONSES_FILE, "w") as f:
-                    import json
-                    json.dump([], f)
+                sheet = get_sheet()
+                if sheet:
+                    sheet.clear()
                 st.success("All responses cleared.")
                 st.rerun()
             except Exception as e:
